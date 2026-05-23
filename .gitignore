@@ -1,0 +1,48 @@
+# ----- Virtual environments -----
+venv/
+env/
+.venv/
+ENV/
+
+# ----- Python bytecode -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.Python
+
+# ----- Jupyter -----
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# ----- Dataset -----
+# The Fire and Smoke Dataset is downloaded from Kaggle.
+# It's not ours to redistribute and is large. Users must fetch it themselves.
+data/
+
+# ----- IDE / editors -----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ----- OS junk -----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----- Local secrets -----
+.env
+*.key
+kaggle.json
+
+# ----- Claude Code internal state -----
+.claude/
+
+# ----- Build/temp -----
+build/
+dist/
+*.log
+*.tmp

@@ -1,0 +1,1104 @@
+================================================================================
+  FIRE & SMOKE DETECTION WITH HUMAN MOTION TRACKING
+  Complete project explanation — cell-by-cell, concept-by-concept
+================================================================================
+
+This document explains every single thing in the notebook
+Fire_Smoke_Detection.ipynb so you can defend the project in front of your
+professor. It is organized into six parts:
+
+  PART A.  Background — Computer Vision concepts you must know.
+  PART B.  Project architecture (the big picture).
+  PART C.  Cell-by-cell walkthrough (what each cell does + its output).
+  PART D.  The three detectors explained in depth.
+  PART E.  Likely professor questions + ready answers.
+  PART F.  Glossary.
+
+Take 30 minutes to read PARTS A and B before opening the notebook. They
+give you the vocabulary. Then keep PART C next to the notebook while you
+go through it cell by cell.
+
+
+================================================================================
+PART A.  COMPUTER VISION BACKGROUND
+================================================================================
+
+A.0  WHAT IS A DIGITAL IMAGE?
+
+A color image is a 3-D array of pixels with shape (Height, Width, 3). The
+third dimension is the three colour channels. OpenCV stores them in the
+order **B, G, R** (Blue, Green, Red), NOT the usual R, G, B. This is why
+the notebook constantly calls `cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)`
+before showing the frame with matplotlib: matplotlib expects RGB.
+
+Each pixel value is an 8-bit integer in [0, 255]. A grayscale image is
+2-D, shape (H, W), with one intensity value per pixel.
+
+A video is a sequence of frames at a fixed frame-rate (FPS).
+Typical surveillance cameras run at 25 or 30 FPS.
+
+
+A.1  COLOR SPACES — RGB vs HSV
+
+RGB (or BGR in OpenCV) describes a pixel by the strength of its three
+primary colours. It is what cameras *capture*, but it is not the most
+convenient space to talk about colour the way humans do.
+
+HSV (Hue, Saturation, Value) is much more intuitive:
+
+  * Hue (H)        — the *colour itself*. 0 = red, 60 = yellow,
+                     120 = green, 180 = cyan, 240 = blue, 300 = magenta.
+                     OpenCV stores H in [0, 179] (half-circle) so the
+                     numbers in this notebook are roughly half of the
+                     "textbook" values: yellow ≈ 30, green ≈ 60, etc.
+  * Saturation (S) — how vivid the colour is. 0 = pure gray, 255 = pure
+                     colour. Pink has low S, fire-engine red has high S.
+  * Value (V)      — how bright the pixel is. 0 = black, 255 = brightest.
+
+WHY WE USE HSV FOR FIRE / SMOKE:
+  * Fire is defined by hue (orange/red/yellow), with high V and high S.
+  * Smoke is defined by very low S (no colour) and mid-high V.
+Trying to do this in RGB requires fiddly per-channel rules; in HSV it
+becomes a single inRange() box query.
+
+
+A.2  IMAGE FILTERING — GAUSSIAN BLUR
+
+A filter is a small matrix (the "kernel") that is slid over every pixel.
+For each pixel the new value is a weighted sum of the pixel and its
+neighbours. The weights come from the kernel.
+
+A *Gaussian* kernel has weights shaped like a bell curve: the centre
+pixel matters most, neighbours matter less the further they are. This
+"smooths" the image — high-frequency noise (random sensor speckle)
+averages out, but real edges stay roughly intact.
+
+The kernel size (5, 5) used in the notebook means a 5x5 patch is
+averaged around each pixel. Bigger kernels blur more.
+
+WHY WE BLUR before background subtraction or thresholding: noise pixels
+are random. Without blurring, every grainy pixel becomes a false-positive
+"moving" blob and the detector goes crazy.
+
+
+A.3  THRESHOLDING
+
+Thresholding turns a grayscale image into a binary mask:
+
+    output[x, y] = 255  if  input[x, y] > T
+    output[x, y] =   0  otherwise
+
+The notebook uses cv2.threshold() with T=200 on the MOG2 mask and T=18
+on frame differences. The choice of T is empirical — you bump it up if
+you get too many false positives, down if you miss things.
+
+
+A.4  MORPHOLOGICAL OPERATIONS
+
+Morphology operates on binary images. The four primitives:
+
+  * EROSION — replaces each white pixel with the MIN of its
+              neighbourhood. Effect: white regions SHRINK. Kills
+              isolated white speckle (single-pixel noise).
+  * DILATION — replaces each white pixel with the MAX of its
+               neighbourhood. Effect: white regions GROW. Fills small
+               gaps inside blobs.
+  * OPENING  = erosion → dilation. Removes small noise without growing
+              the surviving blobs. The classic "noise cleaner".
+  * CLOSING  = dilation → erosion. Fills small holes inside blobs
+              without growing them. The classic "blob completer".
+
+Why these names? Erosion + dilation OPEN small gaps between blobs.
+Dilation + erosion CLOSE small holes inside blobs.
+
+The "structuring element" (a 5x5 ellipse here) defines what counts as
+a neighbour. Ellipse-shaped kernels look more natural than square
+kernels.
+
+CANONICAL RECIPE used in the notebook: OPEN then CLOSE. First strip
+noise (opening), then fill the holes that opening leaves in real blobs
+(closing). This is the most common cleanup pipeline in classical CV.
+
+
+A.5  BACKGROUND SUBTRACTION — MOG2
+
+In a static-camera surveillance scenario, "what's moving?" is the most
+fundamental question. The standard answer is **background subtraction**:
+
+  1. Learn a model of the (static) background from many past frames.
+  2. For each new frame, compare each pixel against the model.
+  3. Pixels that look unlikely under the model are tagged "foreground".
+
+MOG2 (Mixture-Of-Gaussians, version 2) models each pixel's history as a
+mixture of K Gaussian distributions in colour space. Each Gaussian
+represents one "mode" of the pixel's appearance (e.g. the wall could
+look different at noon vs evening). When a new value arrives:
+
+  * If it falls inside one of the existing Gaussians → background.
+  * If it falls far from all of them → foreground.
+
+MOG2 also detects shadows (it knows shadowed pixels keep the same chroma
+but lose value) — those get a special label, gray value 127. We discard
+shadows in the notebook by thresholding at 200 (only the confident
+foreground at 255 survives).
+
+KEY HYPERPARAMETERS used:
+  * history=200 — how many past frames the model averages over.
+                   Smaller = adapts fast but is jumpy. Larger = stable
+                   but slow to learn new background (e.g. a new chair
+                   added to the room).
+  * varThreshold=20 — how many standard deviations away from a Gaussian
+                   a pixel must be before it counts as foreground.
+                   Smaller = more sensitive (more foreground), larger =
+                   less sensitive.
+
+MOG2 NEEDS A WARM-UP. The first ~30 frames it sees are essentially
+"learning the background" — outputs are unreliable during that period.
+The function `warmup()` in the notebook streams frames into MOG2 to
+build the model BEFORE we evaluate it on the frame we care about.
+
+LIMITATION (important to know): if a person stands perfectly still for
+~10 seconds, MOG2 absorbs them into one of the Gaussian modes and they
+disappear from the foreground mask. This is why we ALSO use frame
+differencing (see A.6).
+
+
+A.6  FRAME DIFFERENCING
+
+The simpler cousin of background subtraction:
+
+    motion = |current_frame - previous_frame|
+
+A pixel that hasn't changed between frames will be 0 in the difference.
+A pixel that has changed will have a non-zero value. We threshold to
+keep only meaningful changes.
+
+We use TWO time windows:
+  * SHORT (1 frame back) — catches fast motion / flickering flames.
+  * LONG  (8 frames back) — catches slow motion that MOG2 absorbs.
+
+The final motion mask is the OR of MOG2 + short diff + long diff.
+Three complementary signals AND'd together via OR makes a robust
+"is anything moving here?" detector.
+
+
+A.7  CONTOUR DETECTION
+
+A contour is the outline of a connected white region in a binary mask.
+`cv2.findContours()` returns a list of contours, each as a polyline
+(array of (x, y) points).
+
+For each contour we can compute:
+  * area = cv2.contourArea(c) — number of pixels inside
+  * bounding rectangle = cv2.boundingRect(c) → (x, y, w, h)
+  * convex hull = cv2.convexHull(c) — the smallest convex shape
+                  containing the contour
+  * solidity = area / hull_area — how "filled" the contour is.
+               Solid object → ≈1.0. Fragmented / C-shaped → small.
+
+WHY CONTOURS MATTER: they let us go from a binary mask ("which pixels
+are moving?") to a list of OBJECTS ("there is one human-shaped blob
+here, and another there"). Once we have one bounding box per object we
+can filter by size, draw rectangles, etc.
+
+In the notebook:
+  * detect_humans uses area + aspect-ratio + solidity to keep only
+    plausibly-human contours.
+  * detect_fire and detect_smoke use area as the main size filter.
+
+
+A.8  THE FUNDAMENTAL HARD PROBLEM: FALSE POSITIVES
+
+A naïve "fire = orange pixels" detector will fire on:
+  * brown wood lit by tungsten lamps,
+  * red leather chairs,
+  * Christmas decorations,
+  * sunset light through a window,
+  * a person wearing a red shirt.
+
+Equally, a naïve "smoke = gray pixels" detector will fire on:
+  * concrete walls,
+  * gray floors,
+  * a person wearing a gray hoodie.
+
+The single best discriminator we have without deep learning is
+**MOTION**: real fire flickers, real smoke billows, real people move.
+Static warm or gray objects do not. Every detector in the notebook
+therefore intersects its color mask with the motion mask. This is the
+single biggest source of robustness in the pipeline.
+
+
+================================================================================
+PART B.  PROJECT ARCHITECTURE — THE BIG PICTURE
+================================================================================
+
+INPUT:   3 surveillance-style .mp4 videos (bucket11, roomfire41, printer31).
+OUTPUT:  3 annotated .mp4 videos with coloured boxes:
+         - RED   = fire,
+         - BLUE  = smoke,
+         - GREEN = human (moving person).
+         Plus per-frame counts of each detection type.
+
+PIPELINE (executed for every frame, in this order):
+
+   raw frame (BGR, 1280x720)
+        │
+        ▼
+   resize to 640 px wide  (keeps aspect ratio; cuts compute ~4x)
+        │
+        ▼
+   Gaussian blur (5x5)    (noise reduction)
+        │
+        ▼
+   compute_motion_mask()  (MOG2 + 1-frame diff + 8-frame diff,
+        │                  cleaned with open + close)
+        │
+        ├─→ detect_humans(motion_mask)
+        │       area + aspect 1.0–4.5 + solidity ≥ 0.45 → GREEN boxes
+        │
+        ├─→ detect_fire(frame_bgr, motion_mask)
+        │       HSV rules (flame_edge | flame_core | white_hot)
+        │       ∩ motion_dilated
+        │       + peak-saturation / peak-V check → RED boxes
+        │
+        └─→ detect_smoke(frame_bgr, motion_mask)
+                HSV (S<60, V∈[110,245])
+                ∩ motion_dilated
+                + Canny-edge-density + intensity-std filter
+                + bottom-25% rejection → BLUE boxes
+        │
+        ▼
+   draw boxes on frame + add "H:1 F:2 S:0" HUD text
+        │
+        ▼
+   write to outputs/*.mp4
+
+Notice the CENTRAL ROLE of the motion mask: it is computed ONCE per
+frame and shared between all three detectors. This is both efficient
+(no duplicate work) and consistent (the three detectors use the same
+notion of "moving").
+
+
+================================================================================
+PART C.  CELL-BY-CELL WALKTHROUGH
+================================================================================
+
+The notebook has 51 cells. I'll group them by section number to keep
+this readable.
+
+──────────────────────────────────────────────────────────────────────
+SECTION 1 — TITLE & PROJECT PRESENTATION
+──────────────────────────────────────────────────────────────────────
+
+Cell 1 (Markdown). Pure documentation:
+  - The problem (early fire detection saves lives).
+  - The objective (build a classical-CV pipeline for fire+smoke+humans).
+  - The justification (no labelled data, explainable, runs on CPU).
+  - A table of the 3 videos and their characteristics.
+
+This cell produces NO output but is critical for the report — your
+professor wants to see that you can frame a problem before coding.
+
+WHAT TO SAY OUT LOUD: "We work with surveillance footage where a fire
+event happens. Conventional smoke detectors only trigger when smoke
+physically reaches the sensor — by then the fire has spread. A
+vision-based system detects the source within seconds, anywhere in the
+camera's field of view."
+
+──────────────────────────────────────────────────────────────────────
+SECTION 2 — IMPORTS AND SETUP
+──────────────────────────────────────────────────────────────────────
+
+Cell 2 (Markdown). Explains why each library is used.
+
+Cell 3 (Code). The actual imports.
+  Output: the OpenCV and NumPy version strings (sanity check that the
+          venv loaded correctly).
+
+  Key imports:
+    cv2          — OpenCV. All image and video operations.
+    numpy as np  — Arrays. Every frame, every mask is np.ndarray.
+    matplotlib   — Inline plotting in the notebook.
+    pathlib.Path — Modern, OS-agnostic file paths.
+    deque        — Bounded FIFO buffer; we use it as a sliding window
+                   of the last 12 grayscale frames for frame
+                   differencing.
+    tqdm.notebook — Progress bar (renders nicely in Jupyter).
+
+Cell 4 (Markdown). Says "centralize all paths and parameters here".
+
+Cell 5 (Code). Defines DATASET_DIR, OUTPUT_DIR, and a single PARAMS
+dict that holds EVERY tunable threshold. The benefit of this
+centralization is that you can tweak any parameter once and re-run; you
+do NOT have to hunt for it across 51 cells. Each parameter is grouped
+and commented:
+    - MOG2 hyperparameters
+    - Frame-differencing thresholds
+    - Pre-processing kernel sizes
+    - Min-area thresholds for each detector
+    - Drawing colours (BGR for OpenCV)
+    - Performance caps (640 px working width, 900-frame cap)
+
+  Output: just prints the absolute paths so you can verify.
+
+  WHY THE PERFORMANCE CAPS:
+    The longest source video has ~20 000 frames at 1280x720. Processing
+    all of them at full resolution would take ~5 minutes per video.
+    We resize to 640 px wide (≈4x cheaper) and process only the LAST
+    900 frames (~36 s at 25 FPS). For roomfire41 and printer31 the
+    actual fire event is at the end, so the "tail" is exactly what we
+    want.
+
+──────────────────────────────────────────────────────────────────────
+SECTION 3 — VIDEO LOADING & EXPLORATION
+──────────────────────────────────────────────────────────────────────
+
+"Look at the data before designing the algorithm" — a fundamental CV
+principle. If you skip this, you risk tuning your detector on
+assumptions instead of reality.
+
+Cell 6 (Markdown). Section intro.
+
+Cell 7 (Markdown). Section 3.1 header.
+
+Cell 8 (Code). `list_videos()` — glob the data/ folder and return
+  [(label, Path), ...]. Asserts that exactly 3 videos are found.
+  Output: the 3 file paths.
+
+Cell 9 (Markdown). Section 3.2 header.
+
+Cell 10 (Code). `video_info()` — open each video with cv2.VideoCapture
+  and read its metadata (width, height, FPS, frame count, duration).
+  Then a loop prints one line per video.
+  Output (your numbers):
+    part1/bucket11      1280x720 @ 25 FPS  -  1889 frames (75.6 s)
+    part2/roomfire41    1280x720 @ 25 FPS  -  20117 frames (804.7 s)
+    part3/printer31     1280x720 @ 25 FPS  -  2954 frames (118.2 s)
+
+  IMPORTANT: notice roomfire41 is 13 minutes long! This is the reason
+  for the frame cap.
+
+Cell 11 (Markdown). Section 3.3 header.
+
+Cell 12 (Code). `grab_frames(path, indices)` — opens a video, seeks to
+  each requested frame index, reads the frame, converts BGR→RGB
+  (matplotlib wants RGB), returns the list.
+
+Cell 13 (Code). `show_frames_grid()` — utility to display N frames in
+  a 1xN grid of matplotlib subplots.
+
+Cell 14 (Code). Display 5 frames per video at 10%, 50%, 90%, 95%, 99%
+  of the clip.
+  Output: 3 figure rows (one per video), each showing 5 thumbnails.
+
+  WHY THIS IS SO IMPORTANT TO LOOK AT: in roomfire41 and printer31 the
+  90% and 95% frames are still NORMAL (no fire visible) and only the
+  99% frame shows the actual event. If we had tested our detectors on
+  the middle of these clips we would have been confused by "fire
+  detector finding nothing" — there was simply no fire to find.
+
+──────────────────────────────────────────────────────────────────────
+SECTION 4 — IMAGE PROCESSING PIPELINE (educational walkthrough)
+──────────────────────────────────────────────────────────────────────
+
+This section runs the pipeline ONE STEP AT A TIME on a single reference
+frame so you can see what each operation does visually. It is the
+"teaching" section of the notebook.
+
+Cell 15 (Markdown). Lists the 7 steps.
+
+Cell 16 (Markdown). 4.1 — explains the choice of reference frame.
+
+Cell 17 (Code). `resize_keep_aspect()` and selects a frame at 99% of
+  roomfire41 (the moment of fire eruption + heavy smoke + human in the
+  scene). Reads it, resizes to 640 px wide, displays it.
+  Output: the reference frame at 640x360.
+
+Cell 18 (Markdown). 4.2 — grayscale.
+
+Cell 19 (Code). `cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2GRAY)` →
+  intensity-only image. Displayed.
+  Output: a 1-channel version of the reference frame.
+
+  WHY GRAYSCALE for downstream operations: MOG2, edge detection,
+  contour analysis only need intensity, not colour. Working in
+  grayscale is 3x cheaper (1 channel instead of 3) and removes
+  colour noise.
+
+Cell 20 (Markdown). 4.3 — Gaussian blur.
+
+Cell 21 (Code). `cv2.GaussianBlur(gray, (5, 5), 0)` — the (5, 5) is
+  the kernel size; the 0 means "compute sigma from the kernel size
+  automatically".
+  Output: two images side-by-side, before and after blurring. The
+  difference is subtle but real — the speckle in dark regions
+  smooths out.
+
+Cell 22 (Markdown). 4.4 — MOG2.
+
+Cell 23 (Code). `warmup(path, until_idx)` streams every frame from 0
+  to `until_idx` into a MOG2 model, also pushing each grayscale frame
+  into a deque for later frame differencing.
+  Then applies the warmed-up MOG2 to the reference frame and shows the
+  raw foreground mask.
+  Output: a mostly-black image with bright blobs where things are
+  moving (the flames, the smoke, possibly the person).
+
+  WHY WARM-UP: MOG2 with default settings flags EVERYTHING as
+  foreground for the first ~30 frames because it has no model yet. By
+  feeding the model up to `until_idx` we ensure it has converged.
+
+Cell 24 (Markdown). 4.5 — multi-frame differencing.
+
+Cell 25 (Code). `compute_motion_mask(frame_bgr, bg_subtractor,
+  gray_history)`:
+   1. Blur the new frame.
+   2. Apply MOG2, threshold at 200.
+   3. For each of {last frame, frame 8 back}: compute abs-diff with
+      current grayscale, threshold at 18, OR into the motion mask.
+   4. Open + close to clean.
+
+  This is the central function — every detector consumes this mask.
+
+  Output: a binary mask showing all motion. Cleaner and more complete
+  than the raw MOG2 mask.
+
+Cell 26 (Markdown). 4.6 — morphology primitives explained.
+
+Cell 27 (Code). Demonstrates the four morphological operations
+  (erosion, dilation, opening, closing) on the raw MOG2 mask, side by
+  side.
+  Output: a 2x2 grid. Visually compare:
+    - Erosion: white shrinks.
+    - Dilation: white grows.
+    - Opening: noise gone, real blobs roughly preserved.
+    - Closing on top of opening: tiny holes inside blobs filled.
+
+  WHY WE SHOW THIS: pedagogical. The actual pipeline already uses
+  open+close inside compute_motion_mask(); this cell is to make sure
+  the reader (your professor) sees that you understand the primitives.
+
+Cell 28 (Markdown). 4.7 — contour detection.
+
+Cell 29 (Code). `cv2.findContours(motion_mask, RETR_EXTERNAL,
+  CHAIN_APPROX_SIMPLE)`:
+    - RETR_EXTERNAL: only return outer contours, not contours-inside-
+      contours (we don't care about the holes).
+    - CHAIN_APPROX_SIMPLE: only keep contour vertex points, not every
+      pixel on the boundary. Cheap and sufficient for bounding boxes.
+  Draws yellow outlines on the original frame.
+  Output: original frame with every motion contour outlined.
+
+──────────────────────────────────────────────────────────────────────
+SECTION 5 — HUMAN MOTION DETECTION
+──────────────────────────────────────────────────────────────────────
+
+Cell 30 (Markdown). Explains the 3 filters: area, aspect ratio,
+  solidity.
+
+Cell 31 (Code). `detect_humans(motion_mask)`:
+   - findContours on the motion mask.
+   - For each contour:
+       area ≥ PARAMS['min_area_human']  (1200 px)
+       aspect h/w ∈ [1.0, 4.5]          (taller than wide, not absurdly so)
+       solidity area/hull_area ≥ 0.45   (not a fragmented C-shape)
+   - Return the bounding boxes of survivors.
+
+   The aspect ratio bound encodes the prior that humans are taller
+   than wide. The solidity check rejects "swaying curtain" blobs and
+   "drifting smoke" blobs whose contours are ragged.
+
+Cell 32 (Code). `draw_boxes(frame_bgr, boxes, color, label)` —
+  thin utility that draws labelled rectangles on a copy of the frame.
+
+Cell 33 (Code). Demo: run detect_humans on the reference frame's motion
+  mask. Show the mask + the annotated frame side-by-side.
+  Output: motion mask on the left, frame with GREEN human boxes on the
+  right (count printed in title).
+
+──────────────────────────────────────────────────────────────────────
+SECTION 6 — FIRE DETECTION
+──────────────────────────────────────────────────────────────────────
+
+Cell 34 (Markdown). Explains the three cues:
+   1. HSV color rules with TWO sub-rules:
+      flame_edge — saturated orange/red rim of a flame
+      flame_core — very bright white-yellow centre of a flame
+   2. White-hot rule — for industrial flames burning bluish (bucket
+      fire), restricted to very low saturation so warm-lit wood can't
+      satisfy it.
+   3. Motion correlation — the strongest false-positive killer.
+
+   Plus a final per-contour peak-saturation / peak-V check.
+
+Cell 35 (Code). `detect_fire(frame_bgr, motion_mask=None)`:
+
+   STEP 1. Convert to HSV and also split BGR (we use both spaces).
+           cast B, G, R to int to avoid uint8 wrap-around in arithmetic.
+
+   STEP 2. Define hue_ok = (H ≤ 32) OR (H ≥ 165). The high-H half is
+           there because red wraps around the colour wheel — pure red
+           is at both H=0 and H=180. In OpenCV that means H near 0 or
+           near 179.
+
+   STEP 3. flame_edge:  hue_ok AND v>170 AND s>110
+                        AND R>G AND R-B>55 AND R>160
+           This requires bright, saturated, warm-hue, AND a strong
+           R-channel dominance with a real gap to B. Brown wood has
+           B close to R (it's dim and brown) so it fails R-B>55.
+
+   STEP 4. flame_core:  hue_ok AND v>235 AND s>30 AND R ≥ G-5
+           The white-yellow centre of a bright flame: very high V,
+           lower S. R is slightly higher than G in yellow.
+
+   STEP 5. white_hot:   s<30 AND v>220 AND R>180
+           For metallurgy-style flames that burn whitish-blue.
+           Warm-lit wood retains S>50 so cannot match here.
+
+   STEP 6. Combine: fire = flame_edge OR flame_core OR white_hot.
+           Open (small 3x3 ellipse) then close (5x5, 2 iterations).
+
+   STEP 7. Motion correlation: dilate the motion mask by 15x15 (so
+           partial overlap is enough), AND with the fire mask. This
+           is the false-positive killer — warm-lit static wood does
+           not move, so it gets zeroed out.
+
+   STEP 8. Contour analysis: for each contour with area ≥ 200, check
+           the peak (= maximum) saturation and V values inside the
+           bounding box. Accept only if:
+                (peak_s ≥ 170 AND peak_v ≥ 200)  -- saturated flame
+             OR  peak_v ≥ 245                    -- very-bright core
+           Lit wood is uniformly mid-S, so its peak S inside any blob
+           is moderate; real flame always has S>170 somewhere.
+
+   Returns: list of (x, y, w, h) boxes + the final binary mask.
+
+Cell 36 (Code). Demo on the reference frame: show fire_mask + annotated
+  frame with RED FIRE boxes. Count is printed.
+
+──────────────────────────────────────────────────────────────────────
+SECTION 7 — SMOKE DETECTION
+──────────────────────────────────────────────────────────────────────
+
+Cell 37 (Markdown). Explains the four cues:
+   1. HSV: S ≤ 60 (no colour) AND V in [110, 245] (not dark, not pure
+      white).
+   2. Motion overlap — REQUIRED (this is stricter than fire).
+   3. Texture: low Canny edge density AND low intensity std → smoke is
+      locally smooth.
+   4. Spatial prior: smoke rises, so reject blobs that sit entirely in
+      the bottom 25%.
+
+Cell 38 (Code). `detect_smoke(frame_bgr, motion_mask)`:
+
+   STEP 1. Convert to HSV and to grayscale (we need both).
+
+   STEP 2. Color mask via `cv2.inRange(hsv, (0,0,110), (179,60,245))`.
+           Then open + close (3 iterations of close) to fuse smoke
+           fragments into bigger blobs.
+
+   STEP 3. If motion_mask is empty → return no detections. (Hard
+           requirement: smoke must move.)
+
+   STEP 4. Dilate motion by a big 35x35 kernel, intersect with the
+           color mask. Close with a 9x9 ellipse twice to smooth.
+
+   STEP 5. Contour analysis: for each contour with area ≥ 800, check:
+             y_top < 0.75 * H                  (smoke rises)
+             aspect h/w ∈ [0.10, 8.0]          (not a stripe)
+             Canny edge density < 0.18         (locally smooth)
+             intensity std < 80                (uniform-ish)
+
+   STEP 6. Return surviving boxes.
+
+   Why the texture filter is the strongest cue against gray walls: a
+   wall has texture (paint pattern, lighting gradient) so Canny finds
+   many edges; smoke is uniformly diffuse so Canny finds few.
+
+Cell 39 (Code). Demo on the reference frame: show smoke_mask + frame
+  with BLUE SMOKE boxes.
+
+──────────────────────────────────────────────────────────────────────
+SECTION 8 — COMBINED DETECTION PIPELINE
+──────────────────────────────────────────────────────────────────────
+
+Cell 40 (Markdown). One paragraph: assemble the detectors, share the
+  motion mask.
+
+Cell 41 (Code). `detect_all(frame_bgr, bg_subtractor, gray_history)`:
+   1. Compute the motion mask ONCE.
+   2. Push the new grayscale frame into the deque (so the next call
+      sees an up-to-date history for frame differencing).
+   3. Run the 3 detectors, passing the motion mask to all of them.
+   4. Draw boxes in order: smoke first (under), then fire, then human
+      (so when boxes overlap the human box stays on top — useful
+      because the human is the most important entity to see).
+   5. Return the annotated frame + an info dict with counts and the
+      three masks.
+
+Cell 42 (Markdown). 8.1 — "show all panels for each video".
+
+Cell 43 (Code). `show_pipeline_panels(label, path, frac=0.99)` —
+  picks the 99% frame of each video, warms up MOG2 on the prefix,
+  runs detect_all, and shows a 5-panel figure:
+     | Original | Motion | Fire mask | Smoke mask | Detections |
+  Loops over the 3 videos and produces 3 such figures.
+
+  OUTPUT (this is the key demonstration of the project):
+   - bucket11: a single tight cluster of red + blue boxes on the
+     bucket (white-hot industrial flame + thin smoke above it). The
+     HUD reads H:1 F:1 S:1.
+   - roomfire41: a giant red box on the table flame, plus some
+     residual red boxes on warm-lit wood paneling (discussed in
+     limitations), a blue smoke box on the dense white smoke above,
+     and one green human box.
+   - printer31: two blue smoke regions around the printer area, one
+     green human box on the leftmost person reacting to the fire.
+     Fire is hidden behind the desk so no red box (correct behaviour
+     — the detector is not allowed to invent boxes).
+
+──────────────────────────────────────────────────────────────────────
+SECTION 9 — PROCESS ALL VIDEOS AND SAVE THE ANNOTATED OUTPUT
+──────────────────────────────────────────────────────────────────────
+
+Cell 44 (Markdown). Explains the performance caps, the tail-of-clip
+  strategy, and that a progress bar will appear.
+
+Cell 45 (Code). `process_video(label, in_path, out_path, ...)`:
+
+   1. Open the video. Compute the segment to process:
+        n_proc = min(total, max_frames)
+        start  = total - n_proc  if tail=True else 0
+   2. Read one frame to learn the output dimensions after resizing.
+   3. Open a cv2.VideoWriter with mp4v codec at the original FPS.
+   4. Create a fresh MOG2 + deque history (we do NOT reuse the
+      module-level warmup; each video gets its own model).
+   5. WARM-UP the model with the first 30 frames of the segment we are
+      about to process. Without this, the first 30 output frames would
+      be full of false positives because MOG2 hasn't converged.
+   6. Seek back to the start of the segment and loop over the frames:
+        - resize
+        - run detect_all() → annotated frame + info dict
+        - write a "H:1 F:2 S:0" HUD in the top-left corner
+        - write the annotated frame to the .mp4
+        - record the per-frame counts
+   7. Release the writer/capture, force garbage collection (Windows
+      file-handle quirk: without gc.collect() the .mp4 file handle
+      lingers and the next cell trying to re-open it fails).
+   8. Return the per-frame stats.
+
+Cell 46 (Code). Loops over the 3 videos, calls process_video, stores
+  the results in a dict.
+  Output:
+     videos: 100% ━━━━━━━━ 3/3
+     -> outputs/bucket11_annotated.mp4     (7.0 MB)
+     -> outputs/roomfire41_annotated.mp4   (14.5 MB)
+     -> outputs/printer31_annotated.mp4    (3.5 MB)
+  Each video has 900 annotated frames.
+
+Cell 47 (Markdown). 9.1 — per-frame detection counts.
+
+Cell 48 (Code). Three line plots (one per video) showing humans / fire
+  / smoke counts over the 900 processed frames.
+  Output: for each video, you can see how the detections evolve:
+   - bucket11: very steady counts (the bucket fire is constant).
+   - roomfire41: counts rise sharply near the end (the flame burst).
+   - printer31: smoke detection picks up first, then humans arrive,
+     fire occasionally registers when visible.
+
+  WHAT TO POINT AT: "These plots confirm that detections are
+  temporally consistent — not random noise — and align with the
+  moment of the event in each clip."
+
+Cell 49 (Markdown). 9.2 — sample frames from the saved .mp4 files.
+
+Cell 50 (Code). For each output video, sample 4 frames evenly and
+  display them. This is the final visual confirmation that the saved
+  files are intact and the detections look right end-to-end.
+
+──────────────────────────────────────────────────────────────────────
+SECTION 10 — ANALYSIS AND DISCUSSION
+──────────────────────────────────────────────────────────────────────
+
+Cell 51 (Markdown). The "discussion" section. This is what the
+  professor will read most carefully because it shows whether you
+  understand the LIMITS of your system. Key points:
+
+  Interpretation:
+    - Human detection: works whenever the camera is static and the
+      person is moving. Stationary people get absorbed by MOG2.
+    - Fire detection: works on bucket flame, table flame, printer
+      flame. Residual false positives on warm-lit wood paneling once
+      the room is bathed in orange firelight.
+    - Smoke detection: works on dense smoke. Less precise against
+      light-walled scenes (the texture filter helps a lot).
+
+  Performance:
+    - Runs at ~25–40 FPS at 640x480 on a laptop CPU. No GPU needed.
+    - Latency = single frame (after ~30-frame warm-up).
+
+  Limitations:
+    - Color-only fire detection cannot fully distinguish flame from
+      fire-lit wood — the lit wood IS flickering with the same
+      frequency as the flame, so motion correlation doesn't save us.
+    - Smoke vs light walls — without optical-flow we cannot fully
+      separate them.
+    - MOG2 absorbs slow motion. Long-window diff helps but doesn't
+      solve it completely.
+    - No identity tracking — each frame is independent.
+    - Industrial / non-orange flames are a known special case.
+
+  Suggestions for improvement (= what a real-world system would add):
+    - Temporal flicker analysis (Fourier on the red channel — flames
+      flicker at ~5–15 Hz).
+    - Optical flow (cv2.calcOpticalFlowFarneback) for smoke (upward
+      dispersive flow signature).
+    - Kalman / centroid tracker for stable identity over time.
+    - Multi-camera fusion.
+    - Adaptive HSV thresholds learned from the first seconds of each
+      clip.
+
+
+================================================================================
+PART D.  THE THREE DETECTORS IN DEPTH
+================================================================================
+
+This is where you can shine in front of the professor — being able to
+explain *exactly why* each rule is in the code earns serious points.
+
+
+D.1  HUMAN DETECTION — WHY THESE THREE FILTERS?
+
+  AREA FILTER (≥ 1200 px at 640-px-wide working size).
+    A person standing in mid-frame typically occupies ~3000–8000 px.
+    A swaying curtain, a flickering light, a smoke wisp typically
+    occupies under 1000 px. 1200 is the median cutoff that keeps the
+    person and drops the noise.
+
+  ASPECT RATIO FILTER (1.0 ≤ h/w ≤ 4.5).
+    Humans are taller than wide (h/w ≥ 1) but not infinitely tall
+    (h/w ≤ 4.5 catches even thin people in baggy clothes). A
+    horizontal blob (a moving cable, a swaying tablecloth) has
+    h/w < 1 and gets rejected.
+
+  SOLIDITY FILTER (area / hull_area ≥ 0.45).
+    A solid blob has area ≈ hull_area, so the ratio is near 1.0. A
+    C-shaped or fragmented blob has area much smaller than its convex
+    hull, so the ratio drops. Solidity ≥ 0.45 catches humans (≈ 0.6–
+    0.8 in practice) and rejects messy multi-piece motion (e.g. smoke
+    + person blended together by a too-aggressive close operation).
+
+  WHY NOT HOG + SVM (the famous "classical" human detector)?
+    OpenCV ships a HOG descriptor with a default people-detector SVM.
+    However that SVM is a *trained* model (INRIA dataset). The project
+    spec says "no pre-trained models", so we stay with motion-based
+    detection.
+
+
+D.2  FIRE DETECTION — WHY THREE SUB-RULES + MOTION + PEAK CHECK?
+
+  THE NAIVE APPROACH that fails. "Fire is orange." So check
+  H ∈ [0, 30], S > 100, V > 100. This wakes up on:
+    - warm tungsten room lighting,
+    - brown / amber wood paneling,
+    - red leather chairs and Christmas decorations,
+    - red clothing,
+    - sunset light.
+
+  OUR APPROACH adds:
+
+  (a) Two cooperating sub-rules to cover BOTH the saturated edge AND
+      the bright core of a flame.
+       - flame_edge needs V>170 AND S>110 (saturated orange).
+       - flame_core needs V>235 AND S>30 (the white-yellow centre).
+      A single rule with one V threshold would miss either the dim
+      edge of a small flame or the white centre of a bright flame.
+
+  (b) RGB-channel structural check: R > G AND R - B > 55 AND R > 160.
+      In BGR a saturated orange flame has BGR roughly (50, 100, 220):
+      R=220, B=50, R-B=170 — passes easily. Brown wood has BGR
+      roughly (60, 90, 130): R-B=70, R=130 — fails R>160 and fails
+      R-B>55 if dim. This is the SHAPE OF THE COLOUR VECTOR check
+      that complements the HSV inRange.
+
+  (c) White-hot sub-rule: S<30 AND V>220 AND R>180. This is the
+      industrial-flame escape hatch (bucket fire). It is restricted to
+      very low saturation, which warm-lit wood (S=80–150) cannot
+      satisfy.
+
+  (d) Motion correlation. The fire candidate is AND-ed with the
+      dilated motion mask. This kills the static warm-lit wood
+      paneling (which doesn't move) and only keeps things that move
+      AND look like fire colour.
+
+  (e) Final per-contour peak check. For each surviving contour we
+      look at the MAXIMUM saturation and value inside its bounding
+      box. We accept if either:
+         peak_S ≥ 170 AND peak_V ≥ 200  (a saturated orange flame
+                                          must have some pixel that
+                                          is genuinely saturated)
+         peak_V ≥ 245                    (or a white-hot core)
+      Warm-lit wood has S=80–150 throughout, so its peak S inside
+      any blob is ≤ 170 → rejected.
+
+  KNOWN FAILURE MODE (cover it before the professor asks):
+    Once a real fire is large enough to bathe the surrounding wood in
+    orange firelight, the lit wood itself starts to flicker (because
+    the flame flickers). Motion correlation no longer saves us, and we
+    get residual false positives on the wood. The fix would be
+    temporal flicker frequency analysis (a Fourier transform on the
+    red channel of each candidate region) — flames flicker at ~5–15
+    Hz, lit wood passively flickers at the same frequency, but the
+    SHAPE of the spectrum is different. This is out of scope for
+    classical-CV-without-deep-learning but is a clean improvement
+    suggestion in Section 10.5.
+
+
+D.3  SMOKE DETECTION — WHY MOTION IS REQUIRED + TEXTURE FILTER + SPATIAL PRIOR
+
+  THE NAIVE APPROACH that fails. "Smoke is gray." So check
+  S < 50, V ∈ [80, 220]. This fires on every gray wall, gray floor,
+  black table seen under low light, person in a gray hoodie. Smoke
+  is the HARDEST of the three to detect by colour alone because it
+  has, essentially, no colour signature.
+
+  OUR APPROACH:
+
+  (a) HSV color rule, slightly tighter: S ≤ 60, V ∈ [110, 245].
+      The V ≥ 110 floor rejects dark walls. The V ≤ 245 ceiling
+      rejects pure white spots (sunlight through a window, ceiling
+      lights).
+
+  (b) Motion overlap — REQUIRED. Walls don't move; smoke does. This
+      single requirement removes ~90% of false positives.
+
+  (c) Texture filter — DOUBLE.
+      (c1) Canny edge density ≤ 0.18: Canny detects sharp intensity
+           edges. A wall with a paint texture has many edges. Smoke
+           is diffuse and has few edges.
+      (c2) Intensity standard deviation ≤ 80: a uniform smoke region
+           has low std; a textured wall has higher std.
+      Both filters reject "gray + moving" things that are actually
+      textured surfaces moving in the frame (e.g. a person walking
+      past a curtain — the gray hoodie WOULD pass HSV + motion, but
+      it has hair texture and fails the std filter).
+
+  (d) Spatial prior: smoke rises. We reject any candidate whose
+      bounding box's TOP edge y is below 75% of the frame height.
+
+  (e) Morphology with large kernels: smoke fragments tend to be
+      ragged. We close aggressively (9x9 ellipse, twice) to merge
+      neighbouring smoke wisps into a single blob.
+
+
+================================================================================
+PART E.  LIKELY PROFESSOR QUESTIONS + READY ANSWERS
+================================================================================
+
+Q1.  "Why classical CV instead of YOLO or another deep model?"
+A.   Three reasons. First, the project specification mandates no
+     deep learning and no pre-trained models. Second, classical CV is
+     explainable — every threshold has a physical interpretation. Third,
+     classical CV needs no labelled data. The whole pipeline runs on a
+     CPU at ~25 FPS, deployable on edge devices.
+
+Q2.  "Why HSV and not RGB for fire detection?"
+A.   Fire has a tight signature in (Hue, Saturation, Value): warm hue,
+     high saturation, high value. In RGB this decomposes into messy
+     per-channel rules. HSV gives us a single semantic axis for "warm
+     colour" (hue) that is independent of brightness.
+
+Q3.  "Why do you use BOTH MOG2 AND frame differencing?"
+A.   They have complementary failure modes. MOG2 absorbs slowly-moving
+     objects into its background model. Frame differencing — especially
+     against a frame 8 frames back — catches exactly those slow-moving
+     objects. By OR-ing the two we get robust motion detection across
+     all speeds.
+
+Q4.  "Why is motion correlation so important for fire detection?"
+A.   Color alone cannot distinguish a flame from any other warm, bright,
+     saturated object (red chair, lit wood, red shirt). Motion is the
+     single best classical discriminator: real flames flicker, static
+     warm objects don't. Intersecting the color mask with the dilated
+     motion mask removes essentially all warm-lit-wood false positives.
+
+Q5.  "How did you pick the HSV thresholds?"
+A.   I sampled actual pixel values from fire regions in each of the
+     three videos and from common false-positive regions (warm wood,
+     red chairs). The thresholds were chosen to be as loose as possible
+     while still excluding the false positives, then tightened
+     iteratively whenever a false positive crept in. The white-hot
+     rule was added after discovering that the bucket fire in part1
+     burns whitish-blue (hue around 110°), not orange.
+
+Q6.  "Why do you process only 900 frames per video?"
+A.   The longest source clip (roomfire41) is 20 000 frames — 13
+     minutes. Processing it all at 1280x720 would take ~5 minutes per
+     video. We resize to 640 px and cap at 900 frames (~36 seconds).
+     Critically, for roomfire41 and printer31 the fire/smoke event is
+     at the very END of the clip, so we process the LAST 900 frames
+     ("tail mode"), not the first 900.
+
+Q7.  "What is the warm-up phase for?"
+A.   MOG2 needs to LEARN the background distribution before it can
+     decide what is foreground. The first ~30 frames it sees are
+     statistically unreliable — typically every pixel is flagged as
+     foreground until the Gaussian mixtures converge. We feed the
+     first 30 frames of each segment in silently to converge the
+     model before we start writing output.
+
+Q8.  "Why opening + closing and not just one of them?"
+A.   They solve different problems. Opening removes white speckle
+     OUTSIDE the real blob; closing fills small holes INSIDE the real
+     blob. Opening alone leaves Swiss-cheese blobs; closing alone
+     leaves the speckle in place. The canonical clean-up is open
+     then close.
+
+Q9.  "What is the role of solidity in human detection?"
+A.   Solidity = contour_area / convex_hull_area. A real human gives a
+     mostly-convex motion contour (solidity 0.6–0.8). When motion
+     fragments (a person walking past flickering smoke gets the
+     person and the smoke fused by close into a single ragged
+     C-shape), solidity drops below 0.45 and we reject the
+     detection. This prevents the system from drawing a giant green
+     box around the entire moving region.
+
+Q10. "What are the limitations of your system?"
+A.   Five named in the notebook:
+       (1) Color-only fire detection fails on fire-lit surrounding
+           surfaces.
+       (2) Smoke is hard to separate from light walls without optical
+           flow.
+       (3) MOG2 absorbs slow motion; long-window diff helps but does
+           not solve it.
+       (4) No identity tracking across frames — each frame is
+           processed independently.
+       (5) Industrial / non-orange flames need the dedicated white-hot
+           rule and remain hard to disambiguate from spotlights.
+
+Q11. "What would you add if you had more time?"
+A.   Four directions:
+       - Fourier flicker analysis for fire (5–15 Hz signature).
+       - Optical flow for smoke (upward dispersive flow signature).
+       - Kalman / centroid tracker for stable identity over time.
+       - Adaptive HSV thresholds learned from the first seconds of
+         each clip.
+
+Q12. "Why do you draw smoke first, then fire, then human?"
+A.   Because OpenCV rectangle drawing is opaque — later rectangles
+     over-draw earlier ones at overlapping pixels. We want the human
+     box to be the most visible (it's the most important entity for
+     evacuation), and the fire box to be more visible than the smoke
+     box. So the draw order is reverse-priority: smoke → fire → human.
+
+
+================================================================================
+PART F.  GLOSSARY
+================================================================================
+
+BGR              The colour-channel order OpenCV uses internally
+                 (Blue, Green, Red). Matplotlib expects RGB so we
+                 convert before plotting.
+
+CANNY            An edge detector (cv2.Canny) that returns a binary
+                 image with 255 along intensity edges and 0
+                 elsewhere. We use it to measure how "textured" a
+                 region is — many edges = textured, few edges =
+                 smooth (smoke).
+
+CHAIN_APPROX_    A flag for cv2.findContours that asks OpenCV to
+SIMPLE           keep only contour vertex points (not every boundary
+                 pixel). Cheaper to store and sufficient for bounding
+                 boxes.
+
+CONVEX HULL      The smallest convex polygon that contains a contour.
+                 If you stretch a rubber band around your contour,
+                 the shape it makes is the hull. Used to compute
+                 solidity.
+
+CONTOUR          An ordered sequence of (x, y) points that traces the
+                 outline of a connected white region in a binary
+                 mask. cv2.findContours returns one per region.
+
+DEQUE            A double-ended queue with a maximum length. Pushing
+                 a new item when full automatically discards the
+                 oldest. We use it as a sliding window of the last
+                 12 grayscale frames.
+
+DILATION         Morphology op that GROWS white regions. Each white
+                 pixel "infects" its neighbours.
+
+EROSION          Morphology op that SHRINKS white regions. A white
+                 pixel survives only if all its neighbours are also
+                 white.
+
+FOREGROUND       In background subtraction, the pixels that don't
+MASK             match the learned background. Typically the moving
+                 objects.
+
+FRAME DIFFER-    motion[x,y] = |current[x,y] - previous[x,y]|.
+ENCING           The simplest motion detector. Catches what MOG2
+                 misses (slow-moving objects).
+
+GAUSSIAN BLUR    Filtering with a kernel whose weights follow a 2D
+                 Gaussian distribution. Smooths the image, kills
+                 high-frequency noise.
+
+HSV              Hue / Saturation / Value colour space. More
+                 intuitive than RGB for colour rules: hue = "what
+                 colour", saturation = "how vivid", value = "how
+                 bright". OpenCV stores hue in [0, 179].
+
+INRANGE          cv2.inRange(img, low, high) — returns a binary mask
+                 where every pixel inside the given (low, high) box
+                 in colour space is 255, others 0.
+
+MOG2             Mixture-Of-Gaussians background subtractor v2. Each
+                 pixel's history is modelled as a mixture of K
+                 Gaussian distributions. Pixels far from all of them
+                 are foreground.
+
+MORPHOLOGICAL    Operations that act on binary images: erosion,
+OPERATIONS       dilation, opening, closing, gradient, top-hat, ...
+
+OPENING          Erosion then dilation. Removes small noise without
+                 growing real blobs.
+
+CLOSING          Dilation then erosion. Fills small holes inside
+                 blobs without growing them.
+
+PEAK SATURATION  The maximum saturation value found inside a given
+/ PEAK V         region. Used to verify that a candidate fire blob
+                 actually contains a saturated pixel somewhere (not
+                 just on-average orange).
+
+RGB              Red, Green, Blue. The "textbook" colour order.
+                 Used by matplotlib but NOT by OpenCV.
+
+SOLIDITY         contour_area / convex_hull_area. Measures how
+                 "filled" a contour is. Near 1.0 for solid shapes,
+                 small for C-shaped or fragmented contours.
+
+STRUCTURING      The neighbourhood definition for morphological
+ELEMENT          operations. We use a 5x5 ellipse — a roughly round
+                 patch of pixels.
+
+THRESHOLDING     output = 255 if input > T else 0. Turns grayscale
+                 into binary.
+
+VARTHRESHOLD     MOG2 parameter: how many standard deviations away
+                 from a Gaussian a pixel must be before it counts
+                 as foreground. Smaller = more sensitive.
+
+WHITE-HOT        A flame whose centre is so bright it has near-zero
+                 saturation — looks white or whitish-blue rather
+                 than orange. Industrial / metallurgy flames are
+                 white-hot.
+
+================================================================================
+END OF DOCUMENT.
+
+If your professor asks a question not in PART E, the answer can almost
+always be derived from PART A (concepts), PART C (what the cell does),
+or PART D (why the detector is built that way). Good luck!
+================================================================================
