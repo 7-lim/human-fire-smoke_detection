@@ -1,7 +1,34 @@
+# Core deep-learning stack
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision
+
+# Computer vision + data
 opencv-python>=4.8.0
 numpy>=1.24.0
+Pillow
+PyYAML
+
+# Frame deduplication
+imagehash
+
+# Plotting / EDA
 matplotlib>=3.7.0
+pandas
+
+# Progress + utilities
 tqdm>=4.65.0
+
+# Dataset splitting helpers
+scikit-learn
+
+# Pretrained fire-detector pulled from Hugging Face
+huggingface_hub
+
+# Optional but commonly useful drawing helpers
+supervision
+
+# Notebook environment
 jupyter>=1.0.0
 ipykernel>=6.25.0
 notebook>=7.0.0

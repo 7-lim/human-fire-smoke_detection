@@ -16,10 +16,27 @@ __pycache__/
 .ipynb_checkpoints/
 *.nbconvert.ipynb
 
-# ----- Dataset -----
-# The Fire and Smoke Dataset is downloaded from Kaggle.
-# It's not ours to redistribute and is large. Users must fetch it themselves.
+# ----- Dataset (videos + frames + labels — large, user-supplied) -----
 data/
+
+# ----- Trained / downloaded model weights -----
+# yolov8*.pt is auto-downloaded by ultralytics; best.pt is produced by training.
+# Distribute trained weights via a GitHub Release attachment, not git.
+*.pt
+*.pth
+*.onnx
+*.engine
+models/
+runs/
+
+# ----- Inference outputs (annotated videos / snapshots / reports) -----
+outputs/
+
+# ----- Hugging Face + Ultralytics caches (sometimes land in project root) -----
+.cache/
+.huggingface/
+huggingface/
+ultralytics/
 
 # ----- IDE / editors -----
 .vscode/
@@ -41,7 +58,7 @@ kaggle.json
 # ----- Claude Code internal state -----
 .claude/
 
-# ----- Build/temp -----
+# ----- Build / temp -----
 build/
 dist/
 *.log
