@@ -29,7 +29,7 @@ configs/dataset.yaml
        ▼  notebooks/training.ipynb      →  src/train.py
 models/best.pt     fine-tuned YOLOv8m weights
        │
-       ▼  src/inference.py
+       ▼  src/inference.py  ·  app.py (Streamlit)
 outputs/           real-time webcam, video, or single-image annotation
 ```
 
@@ -65,6 +65,7 @@ outputs/           real-time webcam, video, or single-image annotation
 ├── runs/                       YOLOv8 training outputs (auto-created)
 ├── models/                     promoted best weights
 ├── outputs/                    annotated images / videos from inference
+├── app.py                      Streamlit web demo (image / video / live webcam)
 ├── requirements.txt
 └── README.md
 ```
@@ -311,6 +312,36 @@ Keyboard during video / webcam display:
 | `s` | save current annotated frame to `outputs/` |
 
 CLI flags: `--conf 0.4 --iou 0.5 --weights models/best.pt --save --show / --no-show`.
+
+### Step 7 — Web demo (Streamlit)
+
+[`app.py`](app.py) is a browser front-end over the same detector. It **reuses the
+exact logic** from `src/inference.py` — the model, the per-class confidence
+gates, the smoke area-filter and the ALERT thresholds — so what you see in the
+browser matches `python -m src.inference`.
+
+```bash
+streamlit run app.py
+# then open http://localhost:8501
+```
+
+Four tabs:
+
+| tab | what it does |
+|---|---|
+| 🖼️ **Image** | upload a photo → input vs. annotated side-by-side, per-class counts, ALERT banner, download button |
+| 🎞️ **Video** | upload a clip → frame-by-frame processing with a live progress bar + preview, then plays / downloads the annotated MP4 (capped by a *max frames* slider) |
+| 📷 **Live webcam** | streams the **local machine's** webcam through the detector in real time, with a live ALERT/Clear status line |
+| 🗂️ **Sample images** | pick from `data/dataset/images/test/` without uploading anything |
+
+The sidebar exposes the device (auto-detects CUDA), the weights path, and the
+NMS IoU / image-size sliders. It needs `models/best.pt` — train it (Step 5) or
+drop a downloaded weights file in `models/` first.
+
+> **Note on the webcam tab:** `cv2.VideoCapture` opens the camera of the machine
+> *running* Streamlit. Locally that's your own webcam. If you deploy this to a
+> remote server it cannot reach a visitor's browser camera — use
+> [`streamlit-webrtc`](https://github.com/whitphx/streamlit-webrtc) for that.
 
 ---
 
