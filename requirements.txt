@@ -28,6 +28,9 @@ huggingface_hub
 # Optional but commonly useful drawing helpers
 supervision
 
+# Web demo UI
+streamlit>=1.30.0
+
 # Notebook environment
 jupyter>=1.0.0
 ipykernel>=6.25.0
