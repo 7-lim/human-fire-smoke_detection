@@ -1,0 +1,57 @@
+# Keep the build context tiny — the Dockerfile only COPYs src/, configs/,
+# app.py and requirements.txt, so everything else just slows the build.
+
+# Virtual environments (can be GBs)
+venv/
+.venv/
+env/
+ENV/
+
+# Python bytecode / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Git + Claude internal state
+.git/
+.gitignore
+.claude/
+
+# Large / runtime-only data (mounted as volumes or not needed in the image)
+data/
+runs/
+outputs/
+models/
+notebooks/
+scripts/
+
+# ML tool caches
+.cache/
+.huggingface/
+huggingface/
+ultralytics/
+
+# Editors / OS junk
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / temp / secrets
+*.log
+*.tmp
+.env
+*.key
+kaggle.json
+
+# Docker files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
+README.md

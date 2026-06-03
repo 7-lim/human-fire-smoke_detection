@@ -66,6 +66,9 @@ outputs/           real-time webcam, video, or single-image annotation
 ├── models/                     promoted best weights
 ├── outputs/                    annotated images / videos from inference
 ├── app.py                      Streamlit web demo (image / video / live webcam)
+├── Dockerfile                  containerised Streamlit demo (CPU torch)
+├── docker-compose.yml          one-command run: `docker compose up`
+├── .dockerignore
 ├── requirements.txt
 └── README.md
 ```
@@ -349,6 +352,94 @@ curl -L -o models/best.pt \
 > *running* Streamlit. Locally that's your own webcam. If you deploy this to a
 > remote server it cannot reach a visitor's browser camera — use
 > [`streamlit-webrtc`](https://github.com/whitphx/streamlit-webrtc) for that.
+
+---
+
+## Run with Docker (no local Python needed)
+
+The Streamlit demo ships as a container so anyone with Docker can run it without
+setting up Python, CUDA, or the dependency stack. The image uses a **CPU-only**
+PyTorch build (avoiding the multi-GB CUDA wheels) — plenty for the image / video
+/ sample-image tabs. Built size is ~3.5 GB (the torch + OpenCV + Jupyter stack);
+dropping the notebook deps would trim it further.
+
+### Prerequisites
+
+* [Docker](https://docs.docker.com/get-docker/) (Desktop on Windows/macOS).
+* The trained weights at **`./models/best.pt`** on the host — they are
+  git-ignored and mounted into the container, *not* baked into the image. Grab
+  them from the Release or train your own:
+
+  ```bash
+  # Linux/macOS
+  mkdir -p models
+  curl -L -o models/best.pt \
+    https://github.com/7-lim/human-fire-smoke_detection/releases/download/weights-v1.0/best.pt
+  ```
+  ```powershell
+  # Windows PowerShell
+  New-Item -ItemType Directory -Force models | Out-Null
+  curl.exe -L -o models/best.pt `
+    https://github.com/7-lim/human-fire-smoke_detection/releases/download/weights-v1.0/best.pt
+  ```
+
+### One command (Docker Compose)
+
+```bash
+docker compose up --build      # build the image, then start the app
+# open http://localhost:18501
+docker compose down            # stop + remove when done
+```
+
+> **Why port 18501?** The container serves Streamlit on `8501` internally, but
+> it's published on host port **18501**. On Windows the default `8501` often
+> sits inside a Hyper-V/WSL-reserved range (`8491-8590`) and can't be bound.
+> Override the host port with `APP_PORT`, e.g. `APP_PORT=8600 docker compose up`.
+
+### Or with plain `docker`
+
+```bash
+docker build -t fire-smoke-detector .
+
+# Linux/macOS  ->  open http://localhost:18501
+docker run --rm -p 18501:8501 \
+  -v "$(pwd)/models:/app/models:ro" \
+  -v "$(pwd)/outputs:/app/outputs" \
+  fire-smoke-detector
+```
+```powershell
+# Windows PowerShell  ->  open http://localhost:18501
+docker run --rm -p 18501:8501 `
+  -v "${PWD}\models:/app/models:ro" `
+  -v "${PWD}\outputs:/app/outputs" `
+  fire-smoke-detector
+```
+
+### What's mounted, and why
+
+| host path | container path | mode | purpose |
+|---|---|---|---|
+| `./models` | `/app/models` | read-only | the `best.pt` weights the app loads |
+| `./outputs` | `/app/outputs` | read-write | annotated images / videos persist on the host |
+| `./data` *(optional)* | `/app/data` | read-only | uncomment in `docker-compose.yml` to feed the **Sample images** tab |
+
+### Notes & limits
+
+* **Live webcam tab won't work in the container.** It uses Windows DirectShow
+  (`CAP_DSHOW`) against the *host's* camera, which Docker can't reach. Use the
+  Image / Video / Sample tabs, or run the webcam locally with
+  `streamlit run app.py`.
+* **GPU** is off by default (CPU torch). To use an NVIDIA GPU you need a
+  CUDA-enabled torch build **and** the NVIDIA Container Toolkit (WSL2 on
+  Windows); a ready-to-uncomment `deploy.resources` block is in
+  `docker-compose.yml`.
+* **Run the CLI inside the container** instead of the web UI, e.g.:
+  ```bash
+  docker compose run --rm detector \
+    python -m src.inference --source configs/sample.jpg --save --no-show
+  ```
+* The container has a built-in **healthcheck** hitting Streamlit's
+  `/_stcore/health`; `docker ps` shows `healthy` once it's ready.
 
 ---
 

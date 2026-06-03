@@ -1,0 +1,39 @@
+# Fire / Smoke / Person detector — one-command Streamlit demo.
+#
+#   docker compose up --build      # build + run, then open http://localhost:8501
+#   docker compose down            # stop and remove
+#
+# Requires the trained weights at ./models/best.pt on the host (gitignored,
+# ~22 MB). Train with src/train.py or drop a downloaded best.pt there.
+
+services:
+  detector:
+    build: .
+    image: fire-smoke-detector:latest
+    container_name: fire-smoke-detector
+    # Host port 18501 -> Streamlit's 8501 in the container. The default 8501 is
+    # often blocked on Windows (Hyper-V/WSL reserve the 8491-8590 range), so we
+    # publish on 18501. Override with APP_PORT, e.g. `APP_PORT=8600 docker compose up`.
+    ports:
+      - "${APP_PORT:-18501}:8501"
+    volumes:
+      # Trained weights live on the host — mounted read-only.
+      - ./models:/app/models:ro
+      # Persist annotated images / videos produced from the UI.
+      - ./outputs:/app/outputs
+      # Optional: expose local test images to the "Sample images" tab.
+      # - ./data:/app/data:ro
+    restart: unless-stopped
+
+    # --- GPU (NVIDIA) -------------------------------------------------------
+    # The default image ships CPU-only torch. To use a GPU instead you need a
+    # CUDA-enabled torch build plus the NVIDIA Container Toolkit (WSL2 on
+    # Windows), then uncomment the block below:
+    #
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
